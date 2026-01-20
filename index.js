@@ -3,8 +3,7 @@ import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/ge
 
 // Configuration
 const MODEL_NAME = 'gemini-2.5-flash';
-const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB in bytes
-const CHUNK_SIZE = 15 * 1024 * 1024; // 15MB chunks to ensure we stay under limits
+const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2GB limit for Gemini File API
 
 // API Key Management
 let API_KEY = localStorage.getItem('gemini_api_key') || '';
@@ -157,7 +156,7 @@ const quickPromptDropdown = safeGetElement('quick-prompt-dropdown');
 const quickPromptList = safeGetElement('quick-prompt-list');
 const managePrefixesLink = safeGetElement('manage-prefixes-link');
 
-// File Processing Progress Elements
+// File Processing Progress Elements (Note: Currently placeholders for future chunked upload implementation)
 const fileProcessingProgressElement = safeGetElement('file-processing-progress');
 const progressBar = safeGetElement('progress-bar');
 const progressText = safeGetElement('progress-text');
@@ -991,33 +990,95 @@ function renderFileList() {
 }
 
 /**
- * Convert a file to base64
+ * Upload a file to Gemini using the official File API (Resumable Upload)
  */
-function fileToBase64(file) {
+async function uploadFileToGemini(file) {
+    if (!API_KEY) throw new Error("API Key is required for file upload");
+
+    const fileSize = file.size;
+    const mimeType = file.type || 'application/octet-stream';
+    const displayName = file.name;
+
+    console.log(`Starting upload for ${displayName} (${fileSize} bytes)`);
+
+    // Step 1: Initialize Resumable Upload Session
+    const initResponse = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${API_KEY}`, {
+        method: 'POST',
+        headers: {
+            'X-Goog-Upload-Protocol': 'resumable',
+            'X-Goog-Upload-Command': 'start',
+            'X-Goog-Upload-Header-Content-Length': fileSize,
+            'X-Goog-Upload-Header-Content-Type': mimeType,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ file: { display_name: displayName } })
+    });
+
+    if (!initResponse.ok) {
+        const errorText = await initResponse.text();
+        throw new Error(`Failed to initialize upload: ${errorText}`);
+    }
+
+    const uploadUrl = initResponse.headers.get('X-Goog-Upload-URL');
+    if (!uploadUrl) throw new Error("Failed to get upload URL from headers");
+
+    // Step 2: Perform the actual upload using XMLHttpRequest for progress tracking
     return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = () => {
-            try {
-                const result = reader.result;
-                if (!result || typeof result !== 'string') {
-                    throw new Error('Failed to read file data');
-                }
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', uploadUrl, true);
+        xhr.setRequestHeader('X-Goog-Upload-Offset', '0');
+        xhr.setRequestHeader('X-Goog-Upload-Command', 'upload, finalize');
 
-                const base64String = result.split(',')[1];
-                if (!base64String || base64String.length === 0) {
-                    throw new Error('Failed to extract base64 data from file');
-                }
-
-                resolve(base64String);
-            } catch (error) {
-                reject(new Error(`File conversion error: ${error.message}`));
+        xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) {
+                const percentComplete = (event.loaded / event.total) * 100;
+                updateProgressBar(percentComplete, `Uploading ${displayName}...`);
             }
         };
-        reader.onerror = error => {
-            reject(new Error(`FileReader error: ${error}`));
+
+        xhr.onload = async () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                    const response = JSON.parse(xhr.responseText);
+                    console.log('Upload complete:', response);
+                    resolve(response.file);
+                } catch (e) {
+                    reject(new Error(`Failed to parse upload response: ${xhr.responseText}`));
+                }
+            } else {
+                reject(new Error(`Upload failed with status ${xhr.status}: ${xhr.responseText}`));
+            }
         };
+
+        xhr.onerror = () => reject(new Error("Network error during upload"));
+        xhr.send(file);
     });
+}
+
+function updateProgressBar(percent, message) {
+    if (fileProcessingProgressElement) {
+        fileProcessingProgressElement.classList.remove('hidden');
+    }
+    if (progressBar) {
+        progressBar.style.width = `${percent}%`;
+    }
+    if (progressText) {
+        progressText.textContent = `${Math.round(percent)}%`;
+    }
+    // Update the loading message text if possible, or just log it
+    // For now we use the existing progress UI
+}
+
+function hideProgressBar() {
+    if (fileProcessingProgressElement) {
+        fileProcessingProgressElement.classList.add('hidden');
+    }
+    if (progressBar) {
+        progressBar.style.width = '0%';
+    }
+    if (progressText) {
+        progressText.textContent = '0%';
+    }
 }
 
 /**
@@ -1133,12 +1194,27 @@ async function handleSendMessage(event) {
 
         // Add files if present
         if (uploadedFiles.length > 0) {
-            for (const file of uploadedFiles) {
-                const base64 = await fileToBase64(file);
+            updateProgressBar(0, "Starting file uploads...");
+            const uploadResults = [];
+
+            for (let i = 0; i < uploadedFiles.length; i++) {
+                const file = uploadedFiles[i];
+                try {
+                    const fileMetadata = await uploadFileToGemini(file);
+                    uploadResults.push(fileMetadata);
+                } catch (uploadError) {
+                    console.error(`Error uploading ${file.name}:`, uploadError);
+                    throw new Error(`Failed to upload ${file.name}: ${uploadError.message}`);
+                }
+            }
+
+            hideProgressBar();
+
+            for (const fileMeta of uploadResults) {
                 contentParts.push({
-                    inlineData: {
-                        mimeType: file.type,
-                        data: base64
+                    fileData: {
+                        mimeType: fileMeta.mimeType,
+                        fileUri: fileMeta.uri
                     }
                 });
             }
