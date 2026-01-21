@@ -1032,7 +1032,8 @@ async function uploadFileToGemini(file) {
         xhr.upload.onprogress = (event) => {
             if (event.lengthComputable) {
                 const percentComplete = (event.loaded / event.total) * 100;
-                updateProgressBar(percentComplete, `Uploading ${displayName}...`);
+                const isLarge = fileSize > 20 * 1024 * 1024; // 20MB threshold
+                updateProgressBar(percentComplete, `Uploading ${displayName}...`, isLarge);
             }
         };
 
@@ -1055,7 +1056,7 @@ async function uploadFileToGemini(file) {
     });
 }
 
-function updateProgressBar(percent, message) {
+function updateProgressBar(percent, message, isLargeFile = false) {
     if (fileProcessingProgressElement) {
         fileProcessingProgressElement.classList.remove('hidden');
     }
@@ -1065,8 +1066,16 @@ function updateProgressBar(percent, message) {
     if (progressText) {
         progressText.textContent = `${Math.round(percent)}%`;
     }
-    // Update the loading message text if possible, or just log it
-    // For now we use the existing progress UI
+
+    // Update the info text based on whether it's a large file (>20MB)
+    const progressInfo = document.getElementById('progress-info');
+    if (progressInfo) {
+        if (isLargeFile) {
+            progressInfo.textContent = 'File is over 20MB and will be processed in chunks for optimal performance.';
+        } else {
+            progressInfo.textContent = message || 'Uploading file to Gemini API...';
+        }
+    }
 }
 
 function hideProgressBar() {
